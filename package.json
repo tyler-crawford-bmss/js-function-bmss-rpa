@@ -1,0 +1,11 @@
+{
+  "name": "puppeteer-script",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^19.4.1"
+  }
+}
