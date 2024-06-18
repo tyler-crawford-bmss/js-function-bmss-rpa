@@ -18,9 +18,6 @@ jobs:
       with:
         node-version: '14'
 
-    - name: Set environment variable for Puppeteer
-      run: echo "PUPPETEER_SKIP_DOWNLOAD=false" >> $GITHUB_ENV
-
     - name: Install dependencies
       run: npm install
 
