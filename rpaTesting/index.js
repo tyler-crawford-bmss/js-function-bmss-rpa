@@ -17,7 +17,7 @@ module.exports = async function (context, req) {
         await page.goto(url);
         context.log(`Navigation to ${url} complete.`);
 
-        const screenshotPath = '/home/site/wwwroot/screenshots/github.png';
+        const screenshotPath = '/screenshots/github.png';
         context.log(`Taking screenshot and saving to ${screenshotPath}...`);
         await page.screenshot({ path: screenshotPath });
         context.log(`Screenshot saved to ${screenshotPath}.`);
