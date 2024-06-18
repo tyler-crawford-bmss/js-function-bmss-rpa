@@ -1,11 +1,16 @@
-const puppeteer = require('puppeteer');
+const chromium = require('chrome-aws-lambda');
 
 module.exports = async function (context, req) {
     context.log('JavaScript HTTP trigger function processed a request.');
 
     try {
         context.log('Launching browser...');
-        const browser = await puppeteer.launch();
+        const browser = await chromium.puppeteer.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath,
+            headless: chromium.headless,
+        });
         context.log('Browser launched.');
 
         context.log('Opening new page...');
@@ -17,7 +22,7 @@ module.exports = async function (context, req) {
         await page.goto(url);
         context.log(`Navigation to ${url} complete.`);
 
-        const screenshotPath = '/screenshots/github.png';
+        const screenshotPath = '/home/site/wwwroot/screenshots/github.png';
         context.log(`Taking screenshot and saving to ${screenshotPath}...`);
         await page.screenshot({ path: screenshotPath });
         context.log(`Screenshot saved to ${screenshotPath}.`);
