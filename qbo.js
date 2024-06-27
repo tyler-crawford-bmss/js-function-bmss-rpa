@@ -2,6 +2,7 @@ const puppeteer = require("puppeteer-extra");
 const { app } = require("@azure/functions");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { BlobServiceClient } = require('@azure/storage-blob');
+const nodemailer = require('nodemailer');
 
 puppeteer.use(StealthPlugin());
 
@@ -65,15 +66,47 @@ app.http('qbo', {
       await page.click(continueButtonSelector);
       context.log("Continue button clicked.");
 
+      // Add a wait period after the button click
+      context.log("Waiting for the page to load after button click...");
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds
+
       const textCodeButtonSelector = '[data-testid="challengePickerOption_SMS_OTP"]';
       await page.waitForSelector(textCodeButtonSelector);
       context.log(`Found text code button with selector: ${textCodeButtonSelector}`);
       await page.click(textCodeButtonSelector);
       context.log("Text code button clicked.");
 
-      // Add a wait period to ensure the page has fully loaded
-      context.log("Waiting for page to load after clicking text code button...");
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds
+      // Send email to QBO_USER
+      async function sendEmail(to, cc, subject, text) {
+        let transporter = nodemailer.createTransport({
+          host: 'smtp.office365.com',
+          port: 587,
+          secure: false, // true for 465, false for other ports
+          auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS
+          }
+        });
+
+        let info = await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: to,
+          cc: cc,
+          subject: subject,
+          html: `${text}<br><br><img src="https://storageacctbmssprod001.blob.core.windows.net/container-bmssprod001-public/images/KB-Signature.png" alt="Signature" />`
+        });
+
+        context.log('Message sent: %s', info.messageId);
+      }
+
+      // Call this function after clicking the text code button
+      await sendEmail(
+        process.env.QBO_USER,
+        process.env.QBO_CC_USER,
+        'Your Verification Code',
+        'Please reply to this email with your verification code.'
+      );
+      context.log("Verification email sent to QBO_USER.");
 
       // Capture the screenshot of the next page
       const screenshotBuffer = await page.screenshot();
