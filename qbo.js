@@ -135,8 +135,9 @@ app.http('qbo', {
       const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
       const containerClient = blobServiceClient.getContainerClient(process.env.AZURE_CONTAINER_NAME);
 
+      let verificationCode;
       try {
-        const verificationCode = await monitorBlobStorage(containerClient, 'qboCode', 300000); // 5 minutes timeout
+        verificationCode = await monitorBlobStorage(containerClient, 'qboCode', 300000); // 5 minutes timeout
         context.log("Verification code received:", verificationCode);
 
         // Delete all blobs in the qboCode directory except readme.txt
@@ -156,10 +157,43 @@ app.http('qbo', {
         return;
       }
 
-      // Capture the screenshot of the next page
+      // Input the verification code into the form field
+      const verificationCodeInputSelector = '#ius-mfa-confirm-code';
+      await page.waitForSelector(verificationCodeInputSelector);
+      context.log(`Typing verification code into the input field with selector: ${verificationCodeInputSelector}`);
+      await page.type(verificationCodeInputSelector, verificationCode);
+
+      // Click the "Continue" button
+      const verifyContinueButtonSelector = '[data-testid="VerifyOtpSubmitButton"]';
+      await page.waitForSelector(verifyContinueButtonSelector);
+      context.log(`Found continue button with selector: ${verifyContinueButtonSelector}`);
+      await page.click(verifyContinueButtonSelector);
+      context.log("Verification code submitted and Continue button clicked.");
+
+      // Wait for the page to load after clicking the Continue button
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds
+
+      // Select the "BMSS, LLC" button
+      const bmssButtonSelector = 'button.account-btn.account-btn-focus-quickbooks';
+      await page.waitForSelector(bmssButtonSelector);
+      const buttons = await page.$$(bmssButtonSelector);
+      for (const button of buttons) {
+        const accountName = await button.$eval('.account-name', el => el.textContent.trim());
+        if (accountName === 'BMSS, LLC') {
+          context.log('Clicking BMSS, LLC button');
+          await button.click();
+          break;
+        }
+      }
+      context.log("BMSS, LLC button clicked.");
+
+      // Wait for the final page to load
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds
+
+      // Capture the screenshot of the final page
       const screenshotBuffer = await page.screenshot();
 
-      // Get the HTML content of the next page
+      // Get the HTML content of the final page
       const htmlContent = await page.content();
       await browser.close();
 
