@@ -103,10 +103,58 @@ app.http('qbo', {
       await sendEmail(
         process.env.QBO_USER,
         process.env.QBO_CC_USER,
-        'Your Verification Code',
-        'Please reply to this email with your verification code.'
+        'Your QBO Verification Code',
+        'Please reply to this email with your verification code (in the email body - six digit code only, no text). If it has been more than 5 minutes since the email was sent please email DataAnalytics@bmss.com letting us know to rerun the process.'
       );
       context.log("Verification email sent to QBO_USER.");
+
+      // Function to monitor Azure Blob Storage for the verification code file
+      async function monitorBlobStorage(containerClient, directory, timeout) {
+        const endTime = Date.now() + timeout;
+        while (Date.now() < endTime) {
+          context.log("Checking blob storage for verification code...");
+          let blobs = [];
+          for await (const blob of containerClient.listBlobsFlat({ prefix: directory })) {
+            blobs.push(blob.name);
+          }
+
+          // Exclude the readme.txt file
+          blobs = blobs.filter(name => name !== `${directory}/readme.txt`);
+
+          if (blobs.length > 0) {
+            context.log("Found verification code file:", blobs[0]);
+            return blobs[0].match(/\d{6}/)[0]; // Extract the 6-digit code from the file name
+          }
+
+          // Wait for 10 seconds before checking again
+          await new Promise(resolve => setTimeout(resolve, 10000));
+        }
+        throw new Error("Verification code not found within the timeout period");
+      }
+
+      const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
+      const containerClient = blobServiceClient.getContainerClient(process.env.AZURE_CONTAINER_NAME);
+
+      try {
+        const verificationCode = await monitorBlobStorage(containerClient, 'qboCode', 300000); // 5 minutes timeout
+        context.log("Verification code received:", verificationCode);
+
+        // Delete all blobs in the qboCode directory except readme.txt
+        context.log("Deleting blobs in qboCode directory except readme.txt...");
+        for await (const blob of containerClient.listBlobsFlat({ prefix: 'qboCode/' })) {
+          if (blob.name !== 'qboCode/readme.txt') {
+            await containerClient.deleteBlob(blob.name);
+            context.log(`Deleted blob: ${blob.name}`);
+          }
+        }
+      } catch (error) {
+        context.log("Error during verification code retrieval:", error.message);
+        context.res = {
+          status: 500,
+          body: `An error occurred during verification code retrieval: ${error.message}`
+        };
+        return;
+      }
 
       // Capture the screenshot of the next page
       const screenshotBuffer = await page.screenshot();
@@ -114,9 +162,6 @@ app.http('qbo', {
       // Get the HTML content of the next page
       const htmlContent = await page.content();
       await browser.close();
-
-      const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
-      const containerClient = blobServiceClient.getContainerClient(process.env.AZURE_CONTAINER_NAME);
 
       // Save the screenshot
       const screenshotBlobName = `screenshots/${sanitizedWebsite}_${utcNow}.png`;
