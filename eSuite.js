@@ -40,7 +40,16 @@ app.http('eSuite', {
       await page.type('#Password', password);
       await page.click('#LoginButton');
 
-      // Add a wait period to ensure the page has fully loaded
+      // Add a wait period to ensure the page has fully loaded after login
+      //await page.waitForNavigation({ waitUntil: 'networkidle0' });
+      
+      // Add a wait period to ensure the reports page has fully loaded
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds
+
+      // Click on the "Reports" tab
+      await page.click('#ahrefreports_menu');
+
+      // Add a wait period to ensure the reports page has fully loaded
       await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for 5 seconds
 
       // Capture the screenshot
