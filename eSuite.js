@@ -2,6 +2,7 @@ const puppeteer = require("puppeteer-extra");
 const { app } = require("@azure/functions");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { BlobServiceClient } = require('@azure/storage-blob');
+const xlsx = require('xlsx');
 const fs = require('fs');
 const path = require('path');
 
@@ -30,6 +31,16 @@ async function uploadFileToBlob(filePath, blobServiceClient, containerClient, fi
   const fileBlockBlobClient = containerClient.getBlockBlobClient(fileBlobName);
   await fileBlockBlobClient.upload(fileBuffer, fileBuffer.length);
   context.log("Downloaded file uploaded to Azure Blob Storage");
+}
+
+async function convertXlsxToCsv(xlsxFilePath, csvDirPath) {
+  const workbook = xlsx.readFile(xlsxFilePath);
+  workbook.SheetNames.forEach(sheetName => {
+    const worksheet = workbook.Sheets[sheetName];
+    const csv = xlsx.utils.sheet_to_csv(worksheet, { FS: '|' });
+    const csvFilePath = path.join(csvDirPath, `${sheetName}.csv`);
+    fs.writeFileSync(csvFilePath, csv);
+  });
 }
 
 app.http('eSuite', {
@@ -139,6 +150,19 @@ app.http('eSuite', {
       const fileBlobName = `inbound/eSuite/employeeProject_${utcNow}.xlsx`;
       await uploadFileToBlob(filePath, blobServiceClient, containerClient, fileBlobName, context);
 
+      // Convert the downloaded file to CSV
+      const csvDirPath = path.join('/tmp', `csv_${utcNow}`);
+      fs.mkdirSync(csvDirPath, { recursive: true });
+      await convertXlsxToCsv(filePath, csvDirPath);
+
+      // Upload the CSV files to Azure Blob Storage
+      const csvFiles = fs.readdirSync(csvDirPath);
+      for (const csvFile of csvFiles) {
+        const csvFilePath = path.join(csvDirPath, csvFile);
+        const csvBlobName = `inbound/eSuite/${path.parse(csvFile).name}_${utcNow}.csv`;
+        await uploadFileToBlob(csvFilePath, blobServiceClient, containerClient, csvBlobName, context);
+      }
+
     } catch (error) {
       context.log("Error during function execution:", error.message);
       htmlContent = "An error occurred during processing.";
@@ -148,12 +172,12 @@ app.http('eSuite', {
       context.log("Browser closed");
     }
 
-    //try {
+    try {
       // Save the final HTML content as a .txt file
-    //  await uploadHtmlContent(page, blobServiceClient, containerClient, sanitizedWebsite, 'final', utcNow, context);
-    //} catch (error) {
-    //  context.log("Error during blob storage upload:", error.message);
-    //}
+      await uploadHtmlContent(page, blobServiceClient, containerClient, sanitizedWebsite, 'final', utcNow, context);
+    } catch (error) {
+      context.log("Error during blob storage upload:", error.message);
+    }
 
     context.res = {
       status: 200,
