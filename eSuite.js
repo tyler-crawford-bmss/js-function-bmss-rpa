@@ -147,7 +147,7 @@ app.http('eSuite', {
       context.log("Downloaded file found:", downloadedFile);
 
       // Save the downloaded file to Azure Blob Storage
-      const fileBlobName = `inbound/eSuite/employeeProject_${utcNow}.xlsx`;
+      const fileBlobName = `inbound/eSuite/employeeProject.xlsx`;
       await uploadFileToBlob(filePath, blobServiceClient, containerClient, fileBlobName, context);
 
       // Convert the downloaded file to CSV
@@ -159,7 +159,7 @@ app.http('eSuite', {
       const csvFiles = fs.readdirSync(csvDirPath);
       for (const csvFile of csvFiles) {
         const csvFilePath = path.join(csvDirPath, csvFile);
-        const csvBlobName = `inbound/eSuite/${path.parse(csvFile).name}_${utcNow}.csv`;
+        const csvBlobName = `inbound/eSuite/employeeProject.csv`;
         await uploadFileToBlob(csvFilePath, blobServiceClient, containerClient, csvBlobName, context);
       }
 
@@ -170,13 +170,6 @@ app.http('eSuite', {
     } finally {
       await browser.close();
       context.log("Browser closed");
-    }
-
-    try {
-      // Save the final HTML content as a .txt file
-      await uploadHtmlContent(page, blobServiceClient, containerClient, sanitizedWebsite, 'final', utcNow, context);
-    } catch (error) {
-      context.log("Error during blob storage upload:", error.message);
     }
 
     context.res = {
