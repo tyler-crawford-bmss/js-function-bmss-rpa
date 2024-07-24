@@ -3,6 +3,8 @@ const { app } = require("@azure/functions");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { BlobServiceClient } = require('@azure/storage-blob');
 const nodemailer = require('nodemailer');
+const fs = require('fs');
+const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
@@ -121,8 +123,8 @@ app.http('qbo', {
       await page.setViewport({ width: 1920, height: 1080 }); // Set viewport to a larger size
 
       // Set download behavior
-      //const downloadPath = path.resolve('/mnt/data/downloads');
-      //await page._client().send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath });
+      const downloadPath = path.resolve('/mnt/data/downloads');
+      await page._client().send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath });
 
       context.log("Navigating to URL...");
       step = 'goto_url';
@@ -292,7 +294,6 @@ app.http('qbo', {
               await page.waitForFunction(() => !document.body.innerText.includes('Loading...'), { timeout: 300000 });
               await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step);
 
-              // Wait for the menu to appear
               context.log("Clicking export to CSV option.");
               step = 'click_export_csv';
               const exportCsvOptionSelector = 'li.Menu-menu-item-container-4cf029d';
@@ -301,9 +302,29 @@ app.http('qbo', {
               if (exportCsvOption) {
                   await exportCsvOption.click();
                   await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step);
+
+                  // Wait for the file to be downloaded
+                  context.log("Waiting for file to download...");
+                  await delay(30000);// Adjust the timeout as necessary
+
+                  const files = fs.readdirSync(downloadPath);
+                  const csvFile = files.find(file => file.endsWith('.csv'));
+                  if (csvFile) {
+                      const filePath = path.join(downloadPath, csvFile);
+                      const csvBlobName = `qboBillings/${csvFile}`;
+                      const csvBlockBlobClient = containerClient.getBlockBlobClient(csvBlobName);
+
+                      await csvBlockBlobClient.uploadFile(filePath);
+                      context.log(`CSV file uploaded to Azure Blob Storage as ${csvBlobName}`);
+
+                      // Clean up downloaded file
+                      fs.unlinkSync(filePath);
+                  } else {
+                      throw new Error("CSV file not found in download directory.");
+                  }
               } else {
-                  throw new Error("Export to CSV option not found.");
-              }
+                throw new Error("Export to CSV option not found.");
+                  }
           } else {
               throw new Error("Expand menu button not found in the first row.");
           }
