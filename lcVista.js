@@ -2,47 +2,71 @@ const puppeteer = require("puppeteer-extra");
 const { app } = require("@azure/functions");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { BlobServiceClient } = require('@azure/storage-blob');
+const xlsx = require('xlsx');
 const fs = require('fs');
 const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
-async function captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context) {
-  try {
-    const timeStamp = Date.now();
-    const screenshotBuffer = await page.screenshot({ fullPage: true });
-    const htmlContent = await page.content();
-
-    const screenshotBlobName = `screenshots/${sanitizedWebsite}_${timeStamp}_${step}.png`;
-    const screenshotBlockBlobClient = containerClient.getBlockBlobClient(screenshotBlobName);
-    await screenshotBlockBlobClient.upload(screenshotBuffer, screenshotBuffer.length);
-
-    const htmlBlobName = `html/${sanitizedWebsite}_${timeStamp}_${step}.html`;
-    const htmlBlockBlobClient = containerClient.getBlockBlobClient(htmlBlobName);
-    await htmlBlockBlobClient.upload(htmlContent, Buffer.byteLength(htmlContent));
-
-    context.log(`Screenshot and HTML content uploaded to Azure Blob Storage at step: ${step}`);
-  } catch (captureError) {
-    context.log(`Error capturing or uploading state at step ${step}:`, captureError.message);
-  }
+async function uploadScreenshot(page, blobServiceClient, containerClient, sanitizedWebsite, step, utcNow, context) {
+  const screenshotBuffer = await page.screenshot();
+  const screenshotBlobName = `screenshots/${sanitizedWebsite}_${utcNow}_step${step}.png`;
+  const screenshotBlockBlobClient = containerClient.getBlockBlobClient(screenshotBlobName);
+  await screenshotBlockBlobClient.upload(screenshotBuffer, screenshotBuffer.length);
+  context.log(`Screenshot for step ${step} uploaded to Azure Blob Storage`);
+  return screenshotBuffer;
 }
 
-async function uploadFileToBlob(filePath, blobServiceClient, containerClient, blobName, context) {
+async function uploadHtmlContent(page, blobServiceClient, containerClient, sanitizedWebsite, step, utcNow, context) {
+  const htmlContent = await page.content();
+  const htmlBlobName = `html/html_${sanitizedWebsite}_${utcNow}_step${step}.html`;
+  const htmlBlockBlobClient = containerClient.getBlockBlobClient(htmlBlobName);
+  await htmlBlockBlobClient.upload(htmlContent, Buffer.byteLength(htmlContent));
+  context.log(`HTML content for step ${step} uploaded to Azure Blob Storage`);
+  return htmlContent;
+}
+
+async function uploadFileToBlob(filePath, blobServiceClient, containerClient, fileBlobName, context) {
   const fileBuffer = fs.readFileSync(filePath);
-  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-  await blockBlobClient.upload(fileBuffer, fileBuffer.length);
-  context.log(`File uploaded to Azure Blob Storage at location: ${blobName}`);
+  const fileBlockBlobClient = containerClient.getBlockBlobClient(fileBlobName);
+  await fileBlockBlobClient.upload(fileBuffer, fileBuffer.length);
+  context.log("Downloaded file uploaded to Azure Blob Storage");
 }
 
-app.http('lcVista', {
+async function copyBlob(blobServiceClient, sourceContainer, sourceBlob, destinationContainer, destinationBlob, context) {
+  const sourceBlobClient = blobServiceClient.getContainerClient(sourceContainer).getBlobClient(sourceBlob);
+  const destinationBlobClient = blobServiceClient.getContainerClient(destinationContainer).getBlobClient(destinationBlob);
+  await destinationBlobClient.beginCopyFromURL(sourceBlobClient.url);
+  context.log(`Copied blob from ${sourceBlob} to ${destinationBlob}`);
+}
+
+async function convertXlsxToCsv(xlsxFilePath, csvDirPath) {
+  const workbook = xlsx.readFile(xlsxFilePath);
+  workbook.SheetNames.forEach(sheetName => {
+    const worksheet = workbook.Sheets[sheetName];
+    const csv = xlsx.utils.sheet_to_csv(worksheet, { FS: '|' });
+    const csvFilePath = path.join(csvDirPath, `${sheetName}.csv`);
+    fs.writeFileSync(csvFilePath, csv);
+  });
+}
+
+app.http('eSuite', {
   methods: ['POST'],
   authLevel: 'anonymous',
   handler: async (request, context) => {
-    context.log("Function 'lcVista' started.");
+    context.log("Function 'eSuite' started.");
 
-    const url = "https://bmssu.lcvista.com/";
-    const username = process.env.LCVISTA_USERNAME;
-    const password = process.env.LCVISTA_PASSWORD;
+    const url = "https://www.empiresuite.com/login?sso=skip";
+    const username = process.env.EMPIRESUITE_USER;
+    const password = process.env.EMPIRESUITE_PW;
+
+    if (!username || !password) {
+      context.res = {
+        status: 400,
+        body: "Username or password environment variable is missing"
+      };
+      return;
+    }
 
     const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
     const containerClient = blobServiceClient.getContainerClient(process.env.AZURE_CONTAINER_NAME);
@@ -57,132 +81,106 @@ app.http('lcVista', {
     const downloadPath = path.resolve('/tmp', `download_${utcNow}`);
     fs.mkdirSync(downloadPath, { recursive: true });
 
-    function delay(time) {
-      return new Promise(resolve => setTimeout(resolve, time));
-    };
-
-    let step = 'initial';
-
     try {
-      const page = await browser.newPage();
-      await page._client().send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath });
-      await page.goto(url, { waitUntil: 'networkidle0' });
-      context.log(`Navigated to ${url}`);
+      // Step 1: Copy existing CSV file to a new location
+      const existingCsvFileName = 'inbound/eSuite/employeeProject.csv';
+      const lastWeekCsvFileName = 'inbound/eSuite/employeeProject_lastWeek.csv';
+      await copyBlob(blobServiceClient, process.env.AZURE_CONTAINER_NAME, existingCsvFileName, process.env.AZURE_CONTAINER_NAME, lastWeekCsvFileName, context);
+      
+      context.log("Existing CSV file saved as last week's file");
 
-      // Capture screenshot and HTML content after the initial load
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
+      let page, screenshotBuffer, htmlContent;
 
-      // Step 2: Fill in the username field
-      step = 'fill_username';
-      await page.type('#i0116', username);
-      context.log("Filled in the username field");
+      page = await browser.newPage();
 
-      // Capture screenshot and HTML content after filling in the username
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
-
-      // Step 3: Click the submit button (after username)
-      step = 'click_submit_button_username';
-      await page.click('#idSIButton9');
-      context.log("Clicked the submit button after username");
-      await delay(5000); // Wait for 5 seconds
-
-      // Capture screenshot and HTML content after clicking the submit button
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
-
-      // Step 4: Fill in the password field
-      step = 'fill_password';
-      await page.waitForSelector('#i0118');  // Ensure the password field is available
-      await page.type('#i0118', password);
-      context.log("Filled in the password field");
-      await delay(5000); // Wait for 5 seconds
-
-      // Capture screenshot and HTML content after filling in the password
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
-
-      // Step 5: Click the submit button (after password)
-      step = 'click_submit_button_password';
-      await page.click('#idSIButton9');
-      context.log("Clicked the submit button after password");
-      await delay(5000); // Wait for 5 seconds
-
-      // Capture screenshot and HTML content after clicking the submit button
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
-
-      // Step 6: Click the "No" button
-      step = 'click_no_button';
-      await page.waitForSelector('#idBtn_Back');  // Ensure the "No" button is available
-      await page.click('#idBtn_Back');
-      context.log("Clicked the 'No' button");
-      await delay(5000); // Wait for 5 seconds
-
-      // Capture screenshot and HTML content after clicking the "No" button
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
-
-      // Step 7: Click the "Reports" link
-      step = 'click_reports_link';
-      await page.waitForSelector('a[href="/bmssu/reports/"]');  // Ensure the "Reports" link is available
-      await page.click('a[href="/bmssu/reports/"]');
-      context.log("Clicked the 'Reports' link");
-      await delay(5000); // Wait for 5 seconds
-
-      // Capture screenshot and HTML content after clicking the "Reports" link
-      await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
-
-      // Step 8: Find the row for "Compliance Progress - Alabama" and click the dropdown menu
-      step = 'find_compliance_progress_alabama';
-      const reportRowIndex = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll('table.table-default tbody tr'));
-        return rows.findIndex(row => {
-          const nameCell = row.querySelector('td:first-child');
-          return nameCell && nameCell.textContent.trim().includes('Compliance Progress - Alabama');
-        });
+      // Set the download behavior to allow downloads to a specified directory
+      await page._client().send('Page.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: downloadPath
       });
+      context.log("Download behavior set");
 
-      if (reportRowIndex !== -1) {
-        const dropdownButtonSelector = `table.table-default tbody tr:nth-child(${reportRowIndex + 1}) .test--row-action-button`;
-        await page.click(dropdownButtonSelector);
-        context.log("Clicked the dropdown menu for 'Compliance Progress - Alabama'");
-        await delay(3000); // Wait for the dropdown to appear
+      await page.goto(url);
+      context.log("Navigated to login page");
 
-        // Step 9: Click the "Export to CSV" option
-        step = 'click_export_to_csv';
-        const exportToCSV = await page.evaluateHandle(() => {
-          const buttons = Array.from(document.querySelectorAll('button[name="format"][value="csv"]'));
-          return buttons.find(button => button.textContent.includes('Export to CSV'));
-        });
+      await page.type('#UserName', username);
+      await page.type('#Password', password);
+      await page.click('#LoginButton');
+      context.log("Login credentials entered and login button clicked");
 
-        if (exportToCSV) {
-          await exportToCSV.click();
-          context.log("Clicked the 'Export to CSV' button");
-        } else {
-          throw new Error("Export to CSV option not found");
-        }
+      // Add a wait period to ensure the page has fully loaded after login
+      await new Promise(resolve => setTimeout(resolve, 10000)); // Wait for 10 seconds
+      context.log("Waited for 10 seconds after login");
 
-        // Wait for the file to download
-        await delay(10000); // Adjust the time if necessary
+      // Capture screenshot and HTML after login
+      screenshotBuffer = await uploadScreenshot(page, blobServiceClient, containerClient, sanitizedWebsite, 'login', utcNow, context);
+      htmlContent = await uploadHtmlContent(page, blobServiceClient, containerClient, sanitizedWebsite, 'login', utcNow, context);
 
-        // Find the downloaded file
-        const files = fs.readdirSync(downloadPath);
-        const csvFile = files.find(file => file.endsWith('.csv'));
-        if (csvFile) {
-          const filePath = path.join(downloadPath, csvFile);
-          const blobName = 'lcVista/cpe_al.csv';
+      // Click on the "Reports" tab
+      await page.click('#ahrefreports_menu');
+      context.log("Clicked on 'Reports' tab");
 
-          // Upload the file to Azure Blob Storage
-          await uploadFileToBlob(filePath, blobServiceClient, containerClient, blobName, context);
+      // Add a wait period to ensure the reports page has fully loaded
+      await new Promise(resolve => setTimeout(resolve, 10000)); // Wait for 10 seconds
+      context.log("Waited for 10 seconds after clicking 'Reports' tab");
 
-          // Clean up the downloaded file
-          fs.unlinkSync(filePath);
-          context.log(`Downloaded CSV file '${csvFile}' uploaded as '${blobName}'`);
-        } else {
-          throw new Error("CSV file not found in the download directory");
-        }
-      } else {
-        throw new Error("Row for 'Compliance Progress - Alabama' not found");
+      // Capture screenshot and HTML after clicking Reports tab
+      screenshotBuffer = await uploadScreenshot(page, blobServiceClient, containerClient, sanitizedWebsite, 'reports_tab', utcNow, context);
+      htmlContent = await uploadHtmlContent(page, blobServiceClient, containerClient, sanitizedWebsite, 'reports_tab', utcNow, context);
+
+      // Switch to the frame containing the actual report content
+      const frame = page.frames().find(frame => frame.name() === 'main');
+      if (!frame) throw new Error('Frame "main" not found');
+
+      context.log("Switched to frame 'main'");
+
+      // Wait for the Export button to be visible and clickable
+      await frame.waitForSelector('#bexport', { visible: true });
+      context.log("Export button is visible");
+
+      // Click on the "Export" button
+      await frame.click('#bexport');
+      context.log("Clicked on 'Export' button");
+
+      // Add a wait period to ensure the download has started and completed
+      await new Promise(resolve => setTimeout(resolve, 10000)); // Wait for 10 seconds
+      context.log("Waited for 10 seconds after clicking 'Export' button");
+
+      // Capture screenshot and HTML after clicking Export button
+      //screenshotBuffer = await uploadScreenshot(frame, blobServiceClient, containerClient, sanitizedWebsite, 'export', utcNow, context);
+      //htmlContent = await uploadHtmlContent(frame, blobServiceClient, containerClient, sanitizedWebsite, 'export', utcNow, context);
+
+      // Get the HTML content of the page
+      htmlContent = await frame.content();
+      context.log("HTML content captured");
+
+      // Find the downloaded file
+      const files = fs.readdirSync(downloadPath);
+      const downloadedFile = files.find(file => file.endsWith('.xlsx'));
+      const filePath = path.join(downloadPath, downloadedFile);
+      context.log("Downloaded file found:", downloadedFile);
+
+      // Save the downloaded file to Azure Blob Storage
+      const fileBlobName = `inbound/eSuite/employeeProject.xlsx`;
+      await uploadFileToBlob(filePath, blobServiceClient, containerClient, fileBlobName, context);
+
+      // Convert the downloaded file to CSV
+      const csvDirPath = path.join('/tmp', `csv_${utcNow}`);
+      fs.mkdirSync(csvDirPath, { recursive: true });
+      await convertXlsxToCsv(filePath, csvDirPath);
+
+      // Upload the CSV files to Azure Blob Storage
+      const csvFiles = fs.readdirSync(csvDirPath);
+      for (const csvFile of csvFiles) {
+        const csvFilePath = path.join(csvDirPath, csvFile);
+        const csvBlobName = `inbound/eSuite/employeeProject.csv`;
+        await uploadFileToBlob(csvFilePath, blobServiceClient, containerClient, csvBlobName, context);
       }
 
     } catch (error) {
       context.log("Error during function execution:", error.message);
+      htmlContent = "An error occurred during processing.";
+      screenshotBuffer = Buffer.from([]);
     } finally {
       await browser.close();
       context.log("Browser closed");
@@ -190,7 +188,7 @@ app.http('lcVista', {
 
     context.res = {
       status: 200,
-      body: "Process completed, file uploaded to Blob Storage.",
+      body: "Success!",
       headers: {
         'Content-Type': 'text/plain'
       }
