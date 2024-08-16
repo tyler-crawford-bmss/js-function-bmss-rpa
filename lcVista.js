@@ -2,6 +2,8 @@ const puppeteer = require("puppeteer-extra");
 const { app } = require("@azure/functions");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const { BlobServiceClient } = require('@azure/storage-blob');
+const fs = require('fs');
+const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
@@ -25,6 +27,13 @@ async function captureAndUploadState(page, containerClient, sanitizedWebsite, ut
   }
 }
 
+async function uploadFileToBlob(filePath, blobServiceClient, containerClient, blobName, context) {
+  const fileBuffer = fs.readFileSync(filePath);
+  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+  await blockBlobClient.upload(fileBuffer, fileBuffer.length);
+  context.log(`File uploaded to Azure Blob Storage at location: ${blobName}`);
+}
+
 app.http('lcVista', {
   methods: ['POST'],
   authLevel: 'anonymous',
@@ -32,8 +41,8 @@ app.http('lcVista', {
     context.log("Function 'lcVista' started.");
 
     const url = "https://bmssu.lcvista.com/";
-    const username = process.env.LCVISTA_USERNAME; // Assuming the username is stored in an environment variable
-    const password = process.env.LCVISTA_PASSWORD; // Assuming the password is stored in an environment variable
+    const username = process.env.LCVISTA_USERNAME;
+    const password = process.env.LCVISTA_PASSWORD;
 
     const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
     const containerClient = blobServiceClient.getContainerClient(process.env.AZURE_CONTAINER_NAME);
@@ -45,14 +54,18 @@ app.http('lcVista', {
 
     const utcNow = Date.now();
     const sanitizedWebsite = url.replace(/[^a-zA-Z0-9]/g, '_');
+    const downloadPath = path.resolve('/tmp', `download_${utcNow}`);
+    fs.mkdirSync(downloadPath, { recursive: true });
+
     function delay(time) {
-        return new Promise(resolve => setTimeout(resolve, time));
-      };
+      return new Promise(resolve => setTimeout(resolve, time));
+    };
 
     let step = 'initial';
 
     try {
       const page = await browser.newPage();
+      await page._client().send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath });
       await page.goto(url, { waitUntil: 'networkidle0' });
       context.log(`Navigated to ${url}`);
 
@@ -73,7 +86,6 @@ app.http('lcVista', {
       context.log("Clicked the submit button after username");
       await delay(5000); // Wait for 5 seconds
 
-
       // Capture screenshot and HTML content after clicking the submit button
       await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
 
@@ -84,7 +96,6 @@ app.http('lcVista', {
       context.log("Filled in the password field");
       await delay(5000); // Wait for 5 seconds
 
-
       // Capture screenshot and HTML content after filling in the password
       await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
 
@@ -93,7 +104,6 @@ app.http('lcVista', {
       await page.click('#idSIButton9');
       context.log("Clicked the submit button after password");
       await delay(5000); // Wait for 5 seconds
-
 
       // Capture screenshot and HTML content after clicking the submit button
       await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
@@ -105,7 +115,6 @@ app.http('lcVista', {
       context.log("Clicked the 'No' button");
       await delay(5000); // Wait for 5 seconds
 
-
       // Capture screenshot and HTML content after clicking the "No" button
       await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
 
@@ -116,9 +125,61 @@ app.http('lcVista', {
       context.log("Clicked the 'Reports' link");
       await delay(5000); // Wait for 5 seconds
 
-
       // Capture screenshot and HTML content after clicking the "Reports" link
       await captureAndUploadState(page, containerClient, sanitizedWebsite, utcNow, step, context);
+
+      // Step 8: Find the row for "Compliance Progress - Alabama" and click the dropdown menu
+      step = 'find_compliance_progress_alabama';
+      const reportRowIndex = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('table.table-default tbody tr'));
+        return rows.findIndex(row => {
+          const nameCell = row.querySelector('td:first-child');
+          return nameCell && nameCell.textContent.trim().includes('Compliance Progress - Alabama');
+        });
+      });
+
+      if (reportRowIndex !== -1) {
+        const dropdownButtonSelector = `table.table-default tbody tr:nth-child(${reportRowIndex + 1}) .test--row-action-button`;
+        await page.click(dropdownButtonSelector);
+        context.log("Clicked the dropdown menu for 'Compliance Progress - Alabama'");
+        await delay(3000); // Wait for the dropdown to appear
+
+        // Step 9: Click the "Export to CSV" option
+        step = 'click_export_to_csv';
+        const exportToCSV = await page.evaluateHandle(() => {
+          const buttons = Array.from(document.querySelectorAll('button[name="format"][value="csv"]'));
+          return buttons.find(button => button.textContent.includes('Export to CSV'));
+        });
+
+        if (exportToCSV) {
+          await exportToCSV.click();
+          context.log("Clicked the 'Export to CSV' button");
+        } else {
+          throw new Error("Export to CSV option not found");
+        }
+
+        // Wait for the file to download
+        await delay(10000); // Adjust the time if necessary
+
+        // Find the downloaded file
+        const files = fs.readdirSync(downloadPath);
+        const csvFile = files.find(file => file.endsWith('.csv'));
+        if (csvFile) {
+          const filePath = path.join(downloadPath, csvFile);
+          const blobName = 'lcVista/cpe_al.csv';
+
+          // Upload the file to Azure Blob Storage
+          await uploadFileToBlob(filePath, blobServiceClient, containerClient, blobName, context);
+
+          // Clean up the downloaded file
+          fs.unlinkSync(filePath);
+          context.log(`Downloaded CSV file '${csvFile}' uploaded as '${blobName}'`);
+        } else {
+          throw new Error("CSV file not found in the download directory");
+        }
+      } else {
+        throw new Error("Row for 'Compliance Progress - Alabama' not found");
+      }
 
     } catch (error) {
       context.log("Error during function execution:", error.message);
@@ -129,7 +190,7 @@ app.http('lcVista', {
 
     context.res = {
       status: 200,
-      body: "All steps completed, and content uploaded.",
+      body: "Process completed, file uploaded to Blob Storage.",
       headers: {
         'Content-Type': 'text/plain'
       }
